@@ -239,15 +239,11 @@ def print_header() -> None:
 def print_menu() -> None:
     print("\nMAIN MENU")
     print("-" * 40)
-    print("  1. Single Application Profile")
-    print("  2. Multiple Application Profiles")
-    print("  3. Collection (Aggregated Apps)")
-    print("  4. Agent-Based Scanning Project")
-    print("  5. All Projects in a Workspace")
-    print("-" * 40)
-    print("  6. List All Applications")
-    print("  7. List All Collections")
-    print("  8. List All Workspaces")
+    print("  1. Application Profile SBOM")
+    print("  2. Multiple Application SBOMs")
+    print("  3. Collection SBOMs")
+    print("  4. Agent-Based Project SBOM")
+    print("  5. Workspace SBOMs (All Projects)")
     print("-" * 40)
     print("  0. Exit")
     print()
@@ -293,21 +289,85 @@ def sanitize_filename(name: str) -> str:
     return UNSAFE_FILENAME_CHARS.sub('_', name)
 
 
-def select_from_list(items: List[Dict], prompt: str, name_key: str = "name") -> Optional[Dict]:
+def browse_and_select(items: List[Dict], item_type: str, name_key: str = "name", 
+                      id_key: str = "guid", allow_multi: bool = False) -> Optional[List[Dict]]:
+    """
+    Interactive browser for selecting items with filtering support.
+    Shows first 10 items, allows filtering by string if more than 10.
+    Returns list of selected items (single item in list if allow_multi=False).
+    """
     if not items:
+        print(f"No {item_type}s found.")
         return None
-    print(f"\nAvailable ({len(items)}):")
-    for i, item in enumerate(items, 1):
-        print(f"  {i}. {item.get(name_key, 'Unknown')}")
-    choice = input(f"\n{prompt}: ").strip()
-    try:
-        index = int(choice) - 1
-        if 0 <= index < len(items):
-            return items[index]
-    except ValueError:
-        pass
-    print("Invalid selection.")
-    return None
+    
+    total = len(items)
+    filtered_items = items
+    filter_str = ""
+    
+    while True:
+        print(f"\n{item_type.upper()}S ({len(filtered_items)} of {total})")
+        if filter_str:
+            print(f"Filter: '{filter_str}'")
+        print("-" * 50)
+        
+        # Show up to 10 items
+        display_items = filtered_items[:10]
+        for i, item in enumerate(display_items, 1):
+            name = item.get(name_key, "Unknown")
+            if name_key == "profile":
+                name = item.get("profile", {}).get("name", "Unknown")
+            item_id = item.get(id_key, "N/A")
+            print(f"  {i:2d}. {name}")
+            print(f"      {id_key.upper()}: {item_id}")
+        
+        if len(filtered_items) > 10:
+            print(f"\n  ... and {len(filtered_items) - 10} more")
+        
+        print("\n  [#] Select by number" + (" (comma-separated for multiple)" if allow_multi else ""))
+        print("  [text] Filter by name")
+        print("  [Enter] Clear filter" if filter_str else "")
+        print("  [0] Cancel")
+        
+        choice = input(f"\nSelect {item_type} or filter: ").strip()
+        
+        if choice == "0":
+            return None
+        
+        if choice == "" and filter_str:
+            # Clear filter
+            filter_str = ""
+            filtered_items = items
+            continue
+        
+        # Try to parse as number(s)
+        if choice.replace(",", "").replace(" ", "").isdigit() or (allow_multi and "," in choice):
+            try:
+                if allow_multi and "," in choice:
+                    indices = [int(x.strip()) - 1 for x in choice.split(",")]
+                    selected = [filtered_items[i] for i in indices if 0 <= i < len(display_items)]
+                    if selected:
+                        return selected
+                else:
+                    idx = int(choice) - 1
+                    if 0 <= idx < len(display_items):
+                        return [display_items[idx]]
+                print("Invalid selection.")
+            except (ValueError, IndexError):
+                print("Invalid selection.")
+            continue
+        
+        # Use as filter string
+        filter_str = choice.lower()
+        filtered_items = [
+            item for item in items
+            if filter_str in (item.get(name_key, "") if name_key != "profile" 
+                              else item.get("profile", {}).get("name", "")).lower()
+        ]
+        
+        if not filtered_items:
+            print(f"No {item_type}s match '{choice}'. Showing all.")
+            filter_str = ""
+            filtered_items = items
 
 
 def process_sbom_results(results: List[SBOMResult], output_dir: str) -> int:
@@ -326,24 +386,20 @@ def interactive_mode(generator: VeracodeSBOMGenerator) -> None:
             sys.exit(0)
             
         elif choice == "1":
-            print("\nSINGLE APPLICATION PROFILE")
+            print("\nAPPLICATION PROFILE SBOM")
             print("-" * 40)
-            app_name = input("Enter application name: ").strip()
-            if not app_name:
-                print("Error: Application name cannot be empty.")
+            print("Fetching applications...")
+            apps = generator.get_applications()
+            
+            selected = browse_and_select(apps, "application", name_key="profile", id_key="guid")
+            if not selected:
                 input("\nPress Enter to continue...")
                 continue
             
-            print(f"\nSearching for application: {app_name}")
-            app = generator.get_application_by_name(app_name)
-            if not app:
-                print(f"Error: Application '{app_name}' not found.")
-                input("\nPress Enter to continue...")
-                continue
-            
+            app = selected[0]
             app_guid = app.get("guid")
-            actual_name = app.get("profile", {}).get("name", app_name)
-            print(f"Found: {actual_name} ({app_guid})")
+            app_name = app.get("profile", {}).get("name", "Unknown")
+            print(f"\nSelected: {app_name}")
             
             sbom_format = select_format()
             include_linked, include_vulns = select_options()
@@ -353,67 +409,57 @@ def interactive_mode(generator: VeracodeSBOMGenerator) -> None:
             
             if sbom:
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                save_sbom(sbom, f"{sanitize_filename(actual_name)}_sbom_{timestamp}.json", "sbom_output")
+                save_sbom(sbom, f"{sanitize_filename(app_name)}_sbom_{timestamp}.json", "sbom_output")
             else:
                 print("Error: Failed to generate SBOM. The application may not have SCA scan results.")
             input("\nPress Enter to continue...")
             
         elif choice == "2":
-            print("\nMULTIPLE APPLICATION PROFILES")
+            print("\nMULTIPLE APPLICATION SBOMS")
             print("-" * 40)
-            print("Enter application names (one per line, empty line to finish):")
-            app_names: List[str] = []
-            while True:
-                name = input("  App name: ").strip()
-                if not name:
-                    break
-                app_names.append(name)
+            print("Fetching applications...")
+            apps = generator.get_applications()
             
-            if not app_names:
-                print("Error: No applications specified.")
+            selected = browse_and_select(apps, "application", name_key="profile", id_key="guid", allow_multi=True)
+            if not selected:
                 input("\nPress Enter to continue...")
                 continue
             
+            print(f"\nSelected {len(selected)} application(s)")
             sbom_format = select_format()
             include_linked, include_vulns = select_options()
-            print(f"\nGenerating SBOMs for {len(app_names)} applications...")
             
+            print(f"\nGenerating SBOMs for {len(selected)} applications...")
             success_count = 0
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            for i, name in enumerate(app_names, 1):
-                print(f"\n[{i}/{len(app_names)}] Processing: {name}")
-                app = generator.get_application_by_name(name)
-                if not app:
-                    print(f"   Error: Application not found: {name}")
-                    continue
-                actual_name = app.get("profile", {}).get("name", name)
+            
+            for i, app in enumerate(selected, 1):
+                app_name = app.get("profile", {}).get("name", "Unknown")
+                print(f"\n[{i}/{len(selected)}] Processing: {app_name}")
+                
                 sbom = generator.generate_app_sbom(app.get("guid"), sbom_format, include_linked, include_vulns)
-                if sbom and save_sbom(sbom, f"{sanitize_filename(actual_name)}_sbom_{timestamp}.json", "sbom_output"):
+                if sbom and save_sbom(sbom, f"{sanitize_filename(app_name)}_sbom_{timestamp}.json", "sbom_output"):
                     success_count += 1
                 elif not sbom:
-                    print(f"   Error: Failed to generate SBOM for {actual_name}")
+                    print(f"   Error: Failed to generate SBOM for {app_name}")
             
-            print(f"\nSummary: {success_count}/{len(app_names)} SBOMs generated successfully")
+            print(f"\nSummary: {success_count}/{len(selected)} SBOMs generated successfully")
             input("\nPress Enter to continue...")
             
         elif choice == "3":
-            print("\nCOLLECTION")
+            print("\nCOLLECTION SBOMS")
             print("-" * 40)
-            collection_name = input("Enter collection name: ").strip()
-            if not collection_name:
-                print("Error: Collection name cannot be empty.")
+            print("Fetching collections...")
+            collections = generator.get_collections()
+            
+            selected = browse_and_select(collections, "collection", name_key="name", id_key="guid")
+            if not selected:
                 input("\nPress Enter to continue...")
                 continue
             
-            print(f"\nSearching for collection: {collection_name}")
-            collection = generator.get_collection_by_name(collection_name)
-            if not collection:
-                print(f"Error: Collection '{collection_name}' not found.")
-                input("\nPress Enter to continue...")
-                continue
-            
-            actual_name = collection.get("name", collection_name)
-            print(f"Found: {actual_name} ({collection.get('guid')})")
+            collection = selected[0]
+            collection_name = collection.get("name", "Unknown")
+            print(f"\nSelected: {collection_name}")
             
             sbom_format = select_format()
             include_linked, include_vulns = select_options()
@@ -421,7 +467,7 @@ def interactive_mode(generator: VeracodeSBOMGenerator) -> None:
             
             results = generator.generate_collection_sboms(collection.get("guid"), sbom_format, include_linked, include_vulns)
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            output_dir = f"sbom_output/collection_{sanitize_filename(actual_name)}_{timestamp}"
+            output_dir = f"sbom_output/collection_{sanitize_filename(collection_name)}_{timestamp}"
             success_count = process_sbom_results(results, output_dir)
             
             print(f"\nSummary: {success_count}/{len(results)} SBOMs generated successfully")
@@ -429,21 +475,30 @@ def interactive_mode(generator: VeracodeSBOMGenerator) -> None:
             input("\nPress Enter to continue...")
             
         elif choice == "4":
-            print("\nAGENT-BASED SCANNING PROJECT")
+            print("\nAGENT-BASED PROJECT SBOM")
             print("-" * 40)
             print("Fetching workspaces...")
-            workspace = select_from_list(generator.get_workspaces(), "Select workspace number")
-            if not workspace:
+            workspaces = generator.get_workspaces()
+            
+            selected_ws = browse_and_select(workspaces, "workspace", name_key="name", id_key="id")
+            if not selected_ws:
                 input("\nPress Enter to continue...")
                 continue
             
-            print(f"\nFetching projects for workspace: {workspace.get('name')}")
-            project = select_from_list(generator.get_workspace_projects(workspace.get("id")), "Select project number")
-            if not project:
+            workspace = selected_ws[0]
+            workspace_name = workspace.get("name", "Unknown")
+            print(f"\nFetching projects for workspace: {workspace_name}")
+            projects = generator.get_workspace_projects(workspace.get("id"))
+            
+            selected_proj = browse_and_select(projects, "project", name_key="name", id_key="id")
+            if not selected_proj:
                 input("\nPress Enter to continue...")
                 continue
             
+            project = selected_proj[0]
             project_name = project.get("name", "Unknown")
+            print(f"\nSelected: {project_name}")
+            
             sbom_format = select_format()
             include_vulns = input("Include vulnerabilities? [Y/n]: ").strip().lower() != 'n'
             
@@ -458,15 +513,20 @@ def interactive_mode(generator: VeracodeSBOMGenerator) -> None:
             input("\nPress Enter to continue...")
             
         elif choice == "5":
-            print("\nALL PROJECTS IN WORKSPACE")
+            print("\nWORKSPACE SBOMS (ALL PROJECTS)")
             print("-" * 40)
             print("Fetching workspaces...")
-            workspace = select_from_list(generator.get_workspaces(), "Select workspace number")
-            if not workspace:
+            workspaces = generator.get_workspaces()
+            
+            selected = browse_and_select(workspaces, "workspace", name_key="name", id_key="id")
+            if not selected:
                 input("\nPress Enter to continue...")
                 continue
             
+            workspace = selected[0]
             workspace_name = workspace.get("name", "Unknown")
+            print(f"\nSelected: {workspace_name}")
+            
             sbom_format = select_format()
             include_vulns = input("Include vulnerabilities? [Y/n]: ").strip().lower() != 'n'
             
@@ -479,48 +539,6 @@ def interactive_mode(generator: VeracodeSBOMGenerator) -> None:
             
             print(f"\nSummary: {success_count}/{len(results)} SBOMs generated successfully")
             print(f"   Output directory: {output_dir}")
-            input("\nPress Enter to continue...")
-            
-        elif choice == "6":
-            print("\nALL APPLICATIONS")
-            print("-" * 40)
-            print("Fetching applications...")
-            apps = generator.get_applications()
-            if not apps:
-                print("Error: No applications found or failed to fetch.")
-            else:
-                print(f"\nFound {len(apps)} applications:\n")
-                for i, app in enumerate(apps, 1):
-                    print(f"  {i:3d}. {app.get('profile', {}).get('name', 'Unknown')}")
-                    print(f"       GUID: {app.get('guid', 'N/A')}")
-            input("\nPress Enter to continue...")
-            
-        elif choice == "7":
-            print("\nALL COLLECTIONS")
-            print("-" * 40)
-            print("Fetching collections...")
-            collections = generator.get_collections()
-            if not collections:
-                print("Error: No collections found or failed to fetch.")
-            else:
-                print(f"\nFound {len(collections)} collections:\n")
-                for i, col in enumerate(collections, 1):
-                    print(f"  {i:3d}. {col.get('name', 'Unknown')}")
-                    print(f"       GUID: {col.get('guid', 'N/A')}")
-            input("\nPress Enter to continue...")
-            
-        elif choice == "8":
-            print("\nALL WORKSPACES")
-            print("-" * 40)
-            print("Fetching workspaces...")
-            workspaces = generator.get_workspaces()
-            if not workspaces:
-                print("Error: No workspaces found or failed to fetch.")
-            else:
-                print(f"\nFound {len(workspaces)} workspaces:\n")
-                for i, ws in enumerate(workspaces, 1):
-                    print(f"  {i:3d}. {ws.get('name', 'Unknown')}")
-                    print(f"       ID: {ws.get('id', 'N/A')}")
             input("\nPress Enter to continue...")
             
         else:
@@ -613,11 +631,11 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  Interactive mode:     python script.py
-  Single application:   python script.py --app "MyApp" --format cyclonedx
-  Collection:           python script.py --collection "MyCollection" --format spdx
-  Agent project:        python script.py --workspace "MyWorkspace" --project "MyProject"
-  All workspace:        python script.py --workspace "MyWorkspace"
+  Interactive mode:     python veracode_sbom_generator.py
+  Single application:   python veracode_sbom_generator.py --app "MyApp" --format cyclonedx
+  Collection:           python veracode_sbom_generator.py --collection "MyCollection" --format spdx
+  Agent project:        python veracode_sbom_generator.py --workspace "MyWorkspace" --project "MyProject"
+  All workspace:        python veracode_sbom_generator.py --workspace "MyWorkspace"
         """
     )
     
